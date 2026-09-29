@@ -10,10 +10,7 @@ app = Flask(__name__)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-MODEL_PATH = os.path.join(
-    BASE_DIR,
-    "yolo11n.onnx"
-)
+MODEL_PATH = os.path.join(BASE_DIR, "yolo11n.onnx")
 
 session = ort.InferenceSession(
     MODEL_PATH,
@@ -49,13 +46,13 @@ def save_crowd_data(count, status):
         connection.commit()
         connection.close()
 
-        print("Database saved:", count, status)
-
     except Exception as e:
         print("Database error:", e)
 
 
 def detect_people(frame):
+
+    original_height, original_width = frame.shape[:2]
 
     image = cv2.resize(frame, (640, 640))
 
@@ -64,9 +61,7 @@ def detect_people(frame):
         cv2.COLOR_BGR2RGB
     )
 
-    image = image.astype(
-        np.float32
-    ) / 255.0
+    image = image.astype(np.float32) / 255.0
 
     image = np.transpose(
         image,
@@ -85,9 +80,15 @@ def detect_people(frame):
 
     predictions = outputs[0][0]
 
-    person_count = 0
+    boxes = []
+    confidences = []
 
     for detection in predictions.T:
+
+        x_center = float(detection[0])
+        y_center = float(detection[1])
+        width = float(detection[2])
+        height = float(detection[3])
 
         class_scores = detection[4:]
 
@@ -99,28 +100,62 @@ def detect_people(frame):
             class_scores[class_id]
         )
 
-        if (
-            class_id == 0
-            and confidence >= 0.40
-        ):
-            person_count += 1
+        # Class 0 = person
+        if class_id == 0 and confidence >= 0.40:
 
-    return person_count
+            x1 = int(
+                (x_center - width / 2)
+                * original_width / 640
+            )
+
+            y1 = int(
+                (y_center - height / 2)
+                * original_height / 640
+            )
+
+            box_width = int(
+                width * original_width / 640
+            )
+
+            box_height = int(
+                height * original_height / 640
+            )
+
+            boxes.append([
+                x1,
+                y1,
+                box_width,
+                box_height
+            ])
+
+            confidences.append(confidence)
+
+    # Remove duplicate overlapping boxes
+    if len(boxes) == 0:
+        return 0
+
+    indices = cv2.dnn.NMSBoxes(
+        boxes,
+        confidences,
+        0.40,
+        0.45
+    )
+
+    if len(indices) == 0:
+        return 0
+
+    return len(indices)
 
 
 @app.route("/")
 def index():
-
     return render_template(
         "index.html",
         limit=LIMIT
     )
 
 
-@app.route(
-    "/detect",
-    methods=["POST"]
-)
+@app.route("/detect", methods=["POST"])
 def detect():
 
     global latest_count
@@ -146,22 +181,16 @@ def detect():
         )
 
         if frame is None:
-
             return jsonify({
                 "success": False,
                 "error": "Invalid image"
             })
 
-        person_count = detect_people(
-            frame
-        )
+        person_count = detect_people(frame)
 
         if person_count > LIMIT:
-
             status = "OVER CROWDED"
-
         else:
-
             status = "NORMAL"
 
         latest_count = person_count
@@ -185,30 +214,19 @@ def detect():
             last_saved_time = current_time
 
         return jsonify({
-
             "success": True,
-
             "people": person_count,
-
             "status": status,
-
             "limit": LIMIT
-
         })
 
     except Exception as e:
 
-        print(
-            "Detection error:",
-            e
-        )
+        print("Detection error:", e)
 
         return jsonify({
-
             "success": False,
-
             "error": str(e)
-
         })
 
 
@@ -216,15 +234,10 @@ def detect():
 def status():
 
     return jsonify({
-
         "people": latest_count,
-
         "status": latest_status,
-
         "limit": LIMIT,
-
         "camera": True
-
     })
 
 
@@ -258,10 +271,7 @@ def history():
 
     except Exception as e:
 
-        print(
-            "History error:",
-            e
-        )
+        print("History error:", e)
 
         return jsonify([])
 
