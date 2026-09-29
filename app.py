@@ -1,18 +1,29 @@
 from flask import Flask, render_template, request, jsonify
 import cv2
 import numpy as np
+import onnxruntime as ort
 import sqlite3
 import time
+import os
 
 app = Flask(__name__)
 
-# YOLO model
-model = YOLO("yolo11n.pt")
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# Crowd limit
+MODEL_PATH = os.path.join(
+    BASE_DIR,
+    "yolo11n.onnx"
+)
+
+session = ort.InferenceSession(
+    MODEL_PATH,
+    providers=["CPUExecutionProvider"]
+)
+
+input_name = session.get_inputs()[0].name
+
 LIMIT = 3
 
-# Latest detection
 latest_count = 0
 latest_status = "NORMAL"
 
@@ -21,15 +32,11 @@ last_saved_status = ""
 last_saved_time = 0
 
 
-# ==============================
-# DATABASE
-# ==============================
-
 def save_crowd_data(count, status):
-
     try:
-
-        connection = sqlite3.connect("crowd_data.db")
+        connection = sqlite3.connect(
+            os.path.join(BASE_DIR, "crowd_data.db")
+        )
 
         cursor = connection.cursor()
 
@@ -45,13 +52,61 @@ def save_crowd_data(count, status):
         print("Database saved:", count, status)
 
     except Exception as e:
-
         print("Database error:", e)
 
 
-# ==============================
-# HOME PAGE
-# ==============================
+def detect_people(frame):
+
+    image = cv2.resize(frame, (640, 640))
+
+    image = cv2.cvtColor(
+        image,
+        cv2.COLOR_BGR2RGB
+    )
+
+    image = image.astype(
+        np.float32
+    ) / 255.0
+
+    image = np.transpose(
+        image,
+        (2, 0, 1)
+    )
+
+    image = np.expand_dims(
+        image,
+        axis=0
+    )
+
+    outputs = session.run(
+        None,
+        {input_name: image}
+    )
+
+    predictions = outputs[0][0]
+
+    person_count = 0
+
+    for detection in predictions.T:
+
+        class_scores = detection[4:]
+
+        class_id = int(
+            np.argmax(class_scores)
+        )
+
+        confidence = float(
+            class_scores[class_id]
+        )
+
+        if (
+            class_id == 0
+            and confidence >= 0.40
+        ):
+            person_count += 1
+
+    return person_count
+
 
 @app.route("/")
 def index():
@@ -62,11 +117,10 @@ def index():
     )
 
 
-# ==============================
-# AI DETECTION
-# ==============================
-
-@app.route("/detect", methods=["POST"])
+@app.route(
+    "/detect",
+    methods=["POST"]
+)
 def detect():
 
     global latest_count
@@ -77,12 +131,10 @@ def detect():
 
     try:
 
-        # Receive image from browser
         file = request.files["image"]
 
         image_bytes = file.read()
 
-        # Convert image to OpenCV format
         np_array = np.frombuffer(
             image_bytes,
             np.uint8
@@ -100,23 +152,10 @@ def detect():
                 "error": "Invalid image"
             })
 
-        # YOLO person detection
-        results = model(
-            frame,
-            verbose=False,
-            classes=[0],
-            conf=0.4
+        person_count = detect_people(
+            frame
         )
 
-        person_count = 0
-
-        for result in results:
-
-            for box in result.boxes:
-
-                person_count += 1
-
-        # Crowd status
         if person_count > LIMIT:
 
             status = "OVER CROWDED"
@@ -125,13 +164,9 @@ def detect():
 
             status = "NORMAL"
 
-
-        # Update latest values
         latest_count = person_count
         latest_status = status
 
-
-        # Save database
         current_time = time.time()
 
         if (
@@ -149,7 +184,6 @@ def detect():
             last_saved_status = status
             last_saved_time = current_time
 
-
         return jsonify({
 
             "success": True,
@@ -162,10 +196,12 @@ def detect():
 
         })
 
-
     except Exception as e:
 
-        print("Detection error:", e)
+        print(
+            "Detection error:",
+            e
+        )
 
         return jsonify({
 
@@ -175,10 +211,6 @@ def detect():
 
         })
 
-
-# ==============================
-# STATUS
-# ==============================
 
 @app.route("/status")
 def status():
@@ -196,36 +228,43 @@ def status():
     })
 
 
-# ==============================
-# DATABASE HISTORY
-# ==============================
-
 @app.route("/history")
 def history():
 
-    connection = sqlite3.connect(
-        "crowd_data.db"
-    )
+    try:
 
-    cursor = connection.cursor()
+        connection = sqlite3.connect(
+            os.path.join(
+                BASE_DIR,
+                "crowd_data.db"
+            )
+        )
 
-    cursor.execute("""
-        SELECT id, timestamp, people_count, status
-        FROM crowd_logs
-        ORDER BY id DESC
-        LIMIT 10
-    """)
+        cursor = connection.cursor()
 
-    records = cursor.fetchall()
+        cursor.execute("""
+            SELECT id, timestamp,
+                   people_count, status
+            FROM crowd_logs
+            ORDER BY id DESC
+            LIMIT 10
+        """)
 
-    connection.close()
+        records = cursor.fetchall()
 
-    return jsonify(records)
+        connection.close()
 
+        return jsonify(records)
 
-# ==============================
-# START SERVER
-# ==============================
+    except Exception as e:
+
+        print(
+            "History error:",
+            e
+        )
+
+        return jsonify([])
+
 
 if __name__ == "__main__":
 
